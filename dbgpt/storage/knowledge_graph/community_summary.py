@@ -9,9 +9,12 @@ from dbgpt._private.pydantic import ConfigDict, Field
 from dbgpt.core import Chunk, LLMClient
 from dbgpt.core.awel.flow import Parameter, ResourceCategory, register_resource
 from dbgpt.rag.transformer.community_summarizer import CommunitySummarizer
+from dbgpt.rag.transformer.graph_embedder import GraphEmbedder
 from dbgpt.rag.transformer.graph_extractor import GraphExtractor
+from dbgpt.rag.transformer.text_embedder import TextEmbedder
 from dbgpt.storage.knowledge_graph.base import ParagraphChunk
 from dbgpt.storage.knowledge_graph.community.community_store import CommunityStore
+from dbgpt.storage.knowledge_graph.graph_retriever.graph_retriever import GraphRetriever
 from dbgpt.storage.knowledge_graph.knowledge_graph import (
     GRAPH_PARAMETERS,
     BuiltinKnowledgeGraph,
@@ -179,7 +182,6 @@ class CommunitySummaryKnowledgeGraphConfig(BuiltinKnowledgeGraphConfig):
         default=True,
         description="Enable the graph search for documents and chunks",
     )
-
     knowledge_graph_chunk_search_top_size: int = Field(
         default=5,
         description="Top size of knowledge graph chunk search",
@@ -191,6 +193,22 @@ class CommunitySummaryKnowledgeGraphConfig(BuiltinKnowledgeGraphConfig):
     community_summary_batch_size: int = Field(
         default=20,
         description="Batch size of parallel community building process",
+    )
+    knowledge_graph_embedding_batch_size: int = Field(
+        default=20,
+        description="Batch size of triplets embedding from the text",
+    )
+    similarity_search_topk: int = Field(
+        default=5,
+        description="Topk of similarity search",
+    )
+    similarity_search_score_threshold: float = Field(
+        default=0.7,
+        description="Recall score of similarity search",
+    )
+    enable_text_search: bool = Field(
+        default=False,
+        description="Enable text2gql search or not.",
     )
 
 
@@ -251,16 +269,16 @@ class CommunitySummaryKnowledgeGraph(BuiltinKnowledgeGraph):
             if "TRIPLET_GRAPH_ENABLED" in os.environ
             else config.triplet_graph_enabled
         )
-        self._knowledge_graph_chunk_search_top_size = int(
-            os.getenv(
-                "KNOWLEDGE_GRAPH_CHUNK_SEARCH_TOP_SIZE",
-                config.knowledge_graph_chunk_search_top_size,
-            )
-        )
         self._triplet_extraction_batch_size = int(
             os.getenv(
                 "KNOWLEDGE_GRAPH_EXTRACTION_BATCH_SIZE",
                 config.knowledge_graph_extraction_batch_size,
+            )
+        )
+        self._triplet_embedding_batch_size = int(
+            os.getenv(
+                "KNOWLEDGE_GRAPH_EMBEDDING_BATCH_SIZE",
+                config.knowledge_graph_embedding_batch_size,
             )
         )
         self._community_summary_batch_size = int(
@@ -290,6 +308,9 @@ class CommunitySummaryKnowledgeGraph(BuiltinKnowledgeGraph):
             ),
         )
 
+        self._graph_embedder = GraphEmbedder(self._config.embedding_fn)
+        self._text_embedder = TextEmbedder(self._config.embedding_fn)
+
         def community_store_configure(name: str, cfg: VectorStoreConfig):
             cfg.name = name
             cfg.embedding_fn = config.embedding_fn
@@ -301,13 +322,18 @@ class CommunitySummaryKnowledgeGraph(BuiltinKnowledgeGraph):
             cfg.score_threshold = self._community_score_threshold
 
         self._community_store = CommunityStore(
-            self._graph_store_apdater,
+            self._graph_store_adapter,
             CommunitySummarizer(self._llm_client, self._model_name),
             VectorStoreFactory.create(
                 self._vector_store_type,
                 config.name + "_COMMUNITY_SUMMARY",
                 community_store_configure,
             ),
+        )
+
+        self._graph_retriever = GraphRetriever(
+            config,
+            self._graph_store_adapter,
         )
 
     def get_config(self) -> BuiltinKnowledgeGraphConfig:
@@ -317,7 +343,7 @@ class CommunitySummaryKnowledgeGraph(BuiltinKnowledgeGraph):
     async def aload_document(self, chunks: List[Chunk]) -> List[str]:
         """Extract and persist graph from the document file."""
         if not self.vector_name_exists():
-            self._graph_store_apdater.create_graph(self.get_config().name)
+            self._graph_store_adapter.create_graph(self.get_config().name)
         await self._aload_document_graph(chunks)
         await self._aload_triplet_graph(chunks)
         await self._community_store.build_communities(
@@ -339,21 +365,33 @@ class CommunitySummaryKnowledgeGraph(BuiltinKnowledgeGraph):
         ]
         documment_chunk, paragraph_chunks = self._load_chunks(_chunks)
 
+        if self._graph_store.enable_similarity_search:
+            # Add embeddings from chunk content
+            texts: List[str] = [chunk.content for chunk in paragraph_chunks]
+
+            embeddings = await self._text_embedder.batch_embed(
+                inputs=texts,
+                batch_size=self._triplet_embedding_batch_size,
+            )
+
+            for idx, chunk in enumerate(paragraph_chunks):
+                chunk.embedding = embeddings[idx]
+
         # upsert the document and chunks vertices
-        self._graph_store_apdater.upsert_documents(iter([documment_chunk]))
-        self._graph_store_apdater.upsert_chunks(iter(paragraph_chunks))
+        self._graph_store_adapter.upsert_documents(iter([documment_chunk]))
+        self._graph_store_adapter.upsert_chunks(iter(paragraph_chunks))
 
         # upsert the document structure
         for chunk_index, chunk in enumerate(paragraph_chunks):
             # document -> include -> chunk
             if chunk.parent_is_document:
-                self._graph_store_apdater.upsert_doc_include_chunk(chunk=chunk)
+                self._graph_store_adapter.upsert_doc_include_chunk(chunk=chunk)
             else:  # chunk -> include -> chunk
-                self._graph_store_apdater.upsert_chunk_include_chunk(chunk=chunk)
+                self._graph_store_adapter.upsert_chunk_include_chunk(chunk=chunk)
 
             # chunk -> next -> chunk
             if chunk_index >= 1:
-                self._graph_store_apdater.upsert_chunk_next_chunk(
+                self._graph_store_adapter.upsert_chunk_next_chunk(
                     chunk=paragraph_chunks[chunk_index - 1], next_chunk=chunk
                 )
 
@@ -376,6 +414,15 @@ class CommunitySummaryKnowledgeGraph(BuiltinKnowledgeGraph):
         if not graphs_list:
             raise ValueError("No graphs extracted from the chunks")
 
+        # If enable the similarity search, add the embedding to the graphs
+        if self._graph_store.enable_similarity_search:
+            for idx, graphs in enumerate(graphs_list):
+                embeded_graphs = await self._graph_embedder.batch_embed(
+                    inputs=graphs,
+                    batch_size=self._triplet_embedding_batch_size,
+                )
+                graphs_list[idx] = embeded_graphs
+
         # Upsert the graphs into the graph store
         for idx, graphs in enumerate(graphs_list):
             for graph in graphs:
@@ -386,12 +433,12 @@ class CommunitySummaryKnowledgeGraph(BuiltinKnowledgeGraph):
                         graph.append_edge(edge=edge)
 
                 # Upsert the graph
-                self._graph_store_apdater.upsert_graph(graph)
+                self._graph_store_adapter.upsert_graph(graph)
 
                 # chunk -> include -> entity
                 if document_graph_enabled:
                     for vertex in graph.vertices():
-                        self._graph_store_apdater.upsert_chunk_include_entity(
+                        self._graph_store_adapter.upsert_chunk_include_entity(
                             chunk=chunks[idx], entity=vertex
                         )
 
@@ -465,49 +512,22 @@ class CommunitySummaryKnowledgeGraph(BuiltinKnowledgeGraph):
         ]
         context = "\n".join(summaries) if summaries else ""
 
-        keywords: List[str] = await self._keyword_extractor.extract(text)
-        subgraph = None
-        subgraph_for_doc = None
+        subgraph, (
+            subgraph_for_doc,
+            text2gql_query,
+        ) = await self._graph_retriever.retrieve(text)
 
-        # Local search: extract keywords and explore subgraph
-        triplet_graph_enabled = self._triplet_graph_enabled
-        document_graph_enabled = self._document_graph_enabled
-
-        if triplet_graph_enabled:
-            subgraph = self._graph_store_apdater.explore(
-                subs=keywords, limit=topk, search_scope="knowledge_graph"
-            )
-
-            if document_graph_enabled:
-                keywords_for_document_graph = keywords
-                for vertex in subgraph.vertices():
-                    keywords_for_document_graph.append(vertex.name)
-
-                subgraph_for_doc = self._graph_store_apdater.explore(
-                    subs=keywords_for_document_graph,
-                    limit=self._knowledge_graph_chunk_search_top_size,
-                    search_scope="document_graph",
-                )
-        else:
-            if document_graph_enabled:
-                subgraph_for_doc = self._graph_store_apdater.explore(
-                    subs=keywords,
-                    limit=self._knowledge_graph_chunk_search_top_size,
-                    search_scope="document_graph",
-                )
         knowledge_graph_str = subgraph.format() if subgraph else ""
         knowledge_graph_for_doc_str = (
             subgraph_for_doc.format() if subgraph_for_doc else ""
         )
-
-        logger.info(f"Search subgraph from the following keywords:\n{len(keywords)}")
-
         if not (summaries or knowledge_graph_str or knowledge_graph_for_doc_str):
             return []
 
         # merge search results into context
         content = HYBRID_SEARCH_PT.format(
             context=context,
+            query=text2gql_query,
             knowledge_graph=knowledge_graph_str,
             knowledge_graph_for_doc=knowledge_graph_for_doc_str,
         )
@@ -522,6 +542,10 @@ class CommunitySummaryKnowledgeGraph(BuiltinKnowledgeGraph):
         self._keyword_extractor.truncate()
         logger.info("Truncate triplet extractor")
         self._graph_extractor.truncate()
+        logger.info("Truncate graph embedder")
+        self._graph_embedder.truncate()
+        logger.info("Truncate text embedder")
+        self._text_embedder.truncate()
         return [self._config.name]
 
     def delete_vector_name(self, index_name: str):
@@ -535,13 +559,22 @@ class CommunitySummaryKnowledgeGraph(BuiltinKnowledgeGraph):
         logger.info("Drop triplet extractor")
         self._graph_extractor.drop()
 
+        logger.info("Drop graph embedder")
+        self._graph_embedder.drop()
+
+        logger.info("Drop text embedder")
+        self._text_embedder.drop()
+
 
 HYBRID_SEARCH_PT = """
 =====
-The following information from [Context], [Knowledge Graph], and [Original Text From RAG] can help you answer user questions better.
+The following information from [Context], [Graph Query Statement], [Knowledge Graph], and [Original Text From RAG] can help you answer user questions better.
 
 [Context]:
 {context}
+
+[Graph Query Statement]:
+{query}
 
 [Knowledge Graph]:
 {knowledge_graph}
@@ -609,9 +642,15 @@ answering the user's questions accurately and appropriately, and ensuring that n
 - Extract supporting evidence and examples
 - Resolve conflicts between sources using this as primary reference
 
+4. Original Graph Query [Graph Query Statement]
+- The graph query statement used if text2gql translation is successful
+- Graph query will be empty if the translation failed
+- Use the markdown code block format to highlight the graph query statement if the statement is not empty
+
 ### Output Format
 1. Answer Structure
-- Lead with synthesized core information
+- Lead with a markdown code block to highlight the original cypher query statement from [Graph Query Statement] if it's not empty
+- Demonstate synthesized core information
 - Support with specific references to sources
 - Include relevant entity-relationship pairs
 - Conclude with confidence assessment

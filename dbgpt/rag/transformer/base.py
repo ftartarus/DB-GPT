@@ -2,7 +2,11 @@
 
 import logging
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import Dict, List, Optional
+
+from tenacity import retry, stop_after_attempt, wait_fixed
+
+from dbgpt.core.interface.embeddings import Embeddings
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +25,25 @@ class TransformerBase:
 
 class EmbedderBase(TransformerBase, ABC):
     """Embedder base class."""
+
+    def __init__(self, embedding_fn: Optional[Embeddings]):
+        """Initialize the Embedder."""
+        if not embedding_fn:
+            raise ValueError("Embedding sevice is required.")
+        self._embedding_fn = embedding_fn
+
+    @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
+    async def embed(self, text: str) -> List[float]:
+        """Embed vector from text."""
+        return await self._embedding_fn.aembed_query(text=text)
+
+    @abstractmethod
+    async def batch_embed(
+        self,
+        inputs: List,
+        batch_size: int = 1,
+    ) -> List:
+        """Batch embed vectors from texts."""
 
 
 class SummarizerBase(TransformerBase, ABC):
@@ -50,3 +73,7 @@ class ExtractorBase(TransformerBase, ABC):
 
 class TranslatorBase(TransformerBase, ABC):
     """Translator base class."""
+
+    @abstractmethod
+    async def translate(self, text: str) -> Dict:
+        """Translate results from text."""
