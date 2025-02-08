@@ -199,7 +199,7 @@ class AIWrapper:
             model_request = _build_model_request(payload)
             str_prompt = model_request.messages_to_string()
             model_output = None
-
+            sep = "########S#E#P#########"
             async for output in self._llm_client.generate_stream(model_request.copy()):  # type: ignore # noqa
                 model_output = output
                 if memory and stream_out:
