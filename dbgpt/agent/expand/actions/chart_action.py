@@ -85,12 +85,34 @@ class ChartAction(Action[SqlInput]):
                 chart=json.loads(model_to_json(param)), data_df=data_df
             )
 
+            # 新增：将 data_df 转换为字典
+            data_df_dict = data_df.to_dict(orient='records')
+
+            # 新增：合并 model_to_json(param) 和 data_df_dict
+            content = {
+                **json.loads(model_to_json(param)),
+                "data_df": data_df_dict
+            }
+
+            # 新增：自定义 JSON 编码器
+            from datetime import datetime,date
+            import pandas as pd
+            class CustomJSONEncoder(json.JSONEncoder):
+                def default(self, obj):
+                    if isinstance(obj, (pd.Timestamp, datetime)):
+                        return obj.isoformat()
+                    if isinstance(obj, date):
+                        return obj.isoformat()
+                    return super().default(obj)
+
             return ActionOutput(
                 is_exe_success=True,
-                content=model_to_json(param),
+                # content=model_to_json(param),
+                # 新增：返回合并后的 content
+                content=json.dumps(content, cls=CustomJSONEncoder),
                 view=view,
                 resource_type=self.resource_need.value,
-                resource_value=db._db_name,
+                resource_value=db._db_name
             )
         except Exception as e:
             logger.exception("Check your answers, the sql run failed！")

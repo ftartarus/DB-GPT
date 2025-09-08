@@ -79,9 +79,6 @@ LLM_MODEL_CONFIG = {
     "ollama_proxyllm": "ollama_proxyllm",
     # https://platform.deepseek.com/api-docs/
     "deepseek_proxyllm": "deepseek_proxyllm",
-    # https://docs.siliconflow.cn/quickstart
-    "siliconflow_proxyllm": "siliconflow_proxyllm",
-    "gitee_proxyllm": "gitee_proxyllm",
     "llama-2-7b": os.path.join(MODEL_PATH, "Llama-2-7b-chat-hf"),
     "llama-2-13b": os.path.join(MODEL_PATH, "Llama-2-13b-chat-hf"),
     "llama-2-70b": os.path.join(MODEL_PATH, "Llama-2-70b-chat-hf"),
@@ -299,7 +296,8 @@ EMBEDDING_MODEL_CONFIG = {
     # https://huggingface.co/moka-ai/m3e-large
     "m3e-base": os.path.join(MODEL_PATH, "m3e-base"),
     # https://huggingface.co/moka-ai/m3e-base
-    "m3e-large": os.path.join(MODEL_PATH, "m3e-large"),
+    # "m3e-large": os.path.join(MODEL_PATH, "m3e-large"),
+    "m3e-large": "/Users/fanyimeng/Documents/Models/AI-ModelScope/m3e-large",
     # https://huggingface.co/BAAI/bge-large-en
     "bge-large-en": os.path.join(MODEL_PATH, "bge-large-en"),
     "bge-base-en": os.path.join(MODEL_PATH, "bge-base-en"),
@@ -308,7 +306,6 @@ EMBEDDING_MODEL_CONFIG = {
     "bge-base-zh": os.path.join(MODEL_PATH, "bge-base-zh"),
     # https://huggingface.co/BAAI/bge-m3, beg need normalize_embeddings=True
     "bge-m3": os.path.join(MODEL_PATH, "bge-m3"),
-    "bge-large-zh-v1.5": os.path.join(MODEL_PATH, "bge-large-zh-v1.5"),
     "gte-large-zh": os.path.join(MODEL_PATH, "gte-large-zh"),
     "gte-base-zh": os.path.join(MODEL_PATH, "gte-base-zh"),
     "sentence-transforms": os.path.join(MODEL_PATH, "all-MiniLM-L6-v2"),
@@ -324,7 +321,6 @@ EMBEDDING_MODEL_CONFIG = {
     "bge-reranker-large": os.path.join(MODEL_PATH, "bge-reranker-large"),
     # Proxy rerank model
     "rerank_proxy_http_openapi": "rerank_proxy_http_openapi",
-    "rerank_proxy_siliconflow": "rerank_proxy_siliconflow",
 }
 
 

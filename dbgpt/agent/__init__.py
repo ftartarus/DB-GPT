@@ -33,7 +33,6 @@ __ALL__ = [
     "ConversableAgent",
     "Action",
     "ActionOutput",
-    "LLMConfig",
     "GptsMemory",
     "AgentResource",
     "ResourceType",
